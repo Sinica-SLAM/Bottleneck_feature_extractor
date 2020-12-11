@@ -2,7 +2,7 @@
 
 cmd=run.pl
 
-stage=3
+stage=0
 stop_stage=3
 nj=1
 
@@ -44,7 +44,7 @@ fi
 
 if [ $stage -le 1 -a $stop_stage -ge 1 ]; then
     echo "$0: extracting 16k high-resolution MFCC features"
-    steps/make_mfcc.sh --nj $nj --mfcc-config conf/mfcc_hires.conf \
+    steps/make_mfcc.sh --nj $nj --mfcc-config kaldi_asr/conf/mfcc_hires.conf \
         --cmd "$cmd" $bnf_data_dir/${data_name}_hires || exit 1;
     steps/compute_cmvn_stats.sh $bnf_data_dir/${data_name}_hires || exit 1;
     utils/fix_data_dir.sh $bnf_data_dir/${data_name}_hires
