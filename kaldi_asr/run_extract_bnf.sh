@@ -37,32 +37,32 @@ set -e
 
 if [ $stage -le 0 -a $stop_stage -ge 0 ]; then
     echo "$0: get data"
-    data_name=`basename $data_dir`
-    utils/copy_data_dir.sh $data_dir $bnf_data_dir/${data_name}_hires
-    utils/data/resample_data_dir.sh 16000 $bnf_data_dir/${data_name}_hires
+    utils/copy_data_dir.sh $data_dir $bnf_data_dir/mfcc_hires
+    utils/data/resample_data_dir.sh 16000 $bnf_data_dir/mfcc_hires
 fi
 
 if [ $stage -le 1 -a $stop_stage -ge 1 ]; then
     echo "$0: extracting 16k high-resolution MFCC features"
     steps/make_mfcc.sh --nj $nj --mfcc-config kaldi_asr/conf/mfcc_hires.conf \
-        --cmd "$cmd" $bnf_data_dir/${data_name}_hires || exit 1;
-    steps/compute_cmvn_stats.sh $bnf_data_dir/${data_name}_hires || exit 1;
-    utils/fix_data_dir.sh $bnf_data_dir/${data_name}_hires
+        --cmd "$cmd" $bnf_data_dir/mfcc_hires || exit 1;
+    steps/compute_cmvn_stats.sh $bnf_data_dir/mfcc_hires || exit 1;
+    utils/fix_data_dir.sh $bnf_data_dir/mfcc_hires
 fi
 
 if [ $stage -le 2 -a $stop_stage -ge 2 ]; then
     echo "$0: extracting i-vectors"
     steps/online/nnet2/extract_ivectors_online.sh --cmd "$cmd" --nj $nj \
-        $bnf_data_dir/${data_name}_hires $ivector_dir \
-        $bnf_data_dir/${data_name}_hires_ivector || exit 1; 
+        $bnf_data_dir/mfcc_hires $ivector_dir \
+        $bnf_data_dir/ivectors || exit 1; 
 fi
 
 if [ $stage -le 3 -a $stop_stage -ge 3 ]; then
     echo "$0: extracting bottleneck features"
     steps/nnet3/make_bottleneck_features.sh --cmd "$cmd" --nj $nj \
-        --ivector_dir $bnf_data_dir/${data_name}_hires_ivector \
+        --ivector_dir $bnf_data_dir/ivectors \
         $bnf_name \
-        $bnf_data_dir/${data_name}_hires \
+        $bnf_data_dir/mfcc_hires \
         $(utils/make_absolute.sh $bnf_data_dir) \
-        $nnet_dir
+        $nnet_dir \
+        $(utils/make_absolute.sh $bnf_data_dir)/bnfeats
 fi

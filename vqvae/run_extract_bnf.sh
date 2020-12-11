@@ -38,23 +38,20 @@ bnf_data_dir=$2
 set -e
 
 if [ $stage -le 0 -a $stop_stage -ge 0 ]; then
-    data_name=`basename $data_dir`
-    mkdir -p $feat_dir
-    utils/copy_data_dir.sh $data_dir $bnf_data_dir/${data_name}_mel
-    utils/data/resample_data_dir.sh 16000 $bnf_data_dir/${data_name}_mel
+    utils/copy_data_dir.sh $data_dir $bnf_data_dir/melspec
+    utils/data/resample_data_dir.sh 16000 $bnf_data_dir/melspec
 fi
 
 # Feature preprocessing
 if [ $stage -le 1 -a $stop_stage -ge 1 ]; then
     # Extract features
     python vqvae/feature_extraction.py -c $model_dir/config_feature.json \
-        -T $bnf_data_dir/${data_name}_mel -F $bnf_data_dir/${data_name}_mel/features \
-        -K "mel"        
-
-    mkdir -p $bnf_data_dir/${data_name}_mel_cmvn
-    utils/copy_data_dir.sh $bnf_data_dir/${data_name}_mel $bnf_data_dir/${data_name}_mel_cmvn
+        -T $bnf_data_dir/melspec -F $bnf_data_dir/melspec/data \
+        -K "mel"
+    # Feature normalization
+    utils/copy_data_dir.sh $bnf_data_dir/melspec $bnf_data_dir/melspec_cmvn
     python vqvae/feature_normalization.py -c $model_dir/config_feature.json \
-        -T $bnf_data_dir/${data_name}_mel_cmvn -F $bnf_data_dir/${data_name}_mel_cmvn/features \
+        -T $bnf_data_dir/melspec_cmvn -F $bnf_data_dir/melspec_cmvn/data \
         -S ${model_dir}/stats.pt \
         -K "mel"            
 fi
@@ -63,7 +60,7 @@ fi
 if [ $stage -le 2 -a $stop_stage -ge 2 ]; then
     python vqvae/inference_bnf.py \
         -c $model_dir/config_vqvae.json \
-        -d $bnf_data_dir/${data_name}_mel_cmvn \
+        -d $bnf_data_dir/melspec_cmvn \
         -o $bnf_data_dir \
         -K "mel-${bnf_name}" \
         -m ${model_dir}/model.pt -g $gpu \
