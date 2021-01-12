@@ -10,7 +10,8 @@ import soundfile
 
 import librosa
 
-from kaldi.util.table import SequentialWaveReader
+# from kaldi.util.table import SequentialWaveReader
+from kaldiio import ReadHelper
 
 from feature.stft import STFT
 from feature.mel_spectrum import MelSpectrum
@@ -46,18 +47,20 @@ def load_wav_to_torch(full_path, target_sampling_rate, trim_silence=False):
         else:
             raise ValueError("File format {}... not understood.".format(ext))
 
-        if data_sampling_rate != target_sampling_rate:
-            data = librosa.core.resample(
-                    data, 
-                    data_sampling_rate, 
-                    target_sampling_rate, 
-                    res_type='kaiser_best'
-                )
-            # raise ValueError("{} SR doesn't match target {} SR".format(
-            #     data_sampling_rate, target_sampling_rate))            
     else:
-        data = full_path.data().numpy().astype(np.float32) / MAX_WAV_VALUE
-    
+        data_sampling_rate, data = full_path
+        data = np.array(data).astype(np.float32) / MAX_WAV_VALUE
+
+    if data_sampling_rate != target_sampling_rate:
+        data = librosa.core.resample(
+                data, 
+                data_sampling_rate, 
+                target_sampling_rate, 
+                res_type='kaiser_best'
+            )
+        # raise ValueError("{} SR doesn't match target {} SR".format(
+        #     data_sampling_rate, target_sampling_rate))            
+
     if trim_silence:
         data,_ = librosa.effectstrim(  
                 data,
@@ -132,7 +135,7 @@ def main(config):
     data_list = files_to_list( training_dir / 'wav.scp')
     if sum([1 for d in data_list if len(d) > 2]) > 0:
         scp_file = 'scp:{}'.format(str(training_dir / 'wav.scp'))
-        data_list = SequentialWaveReader(scp_file)
+        data_list = ReadHelper(scp_file)
 
 
     for data_name, data in data_list:

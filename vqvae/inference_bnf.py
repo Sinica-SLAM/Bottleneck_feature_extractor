@@ -9,56 +9,13 @@ import math
 import torch
 import torch.nn.functional as F
 
-from kaldi.util.table import VectorWriter, MatrixWriter
-
-from model.layers_vq import VectorQuantizer
+# from kaldi.util.table import VectorWriter, MatrixWriter
+from kaldiio import ReadHelper, WriteHelper
 
 MAX_WAV_VALUE = 32768.0
 
-class Model(torch.nn.Module):
-    def __init__(self, model_type, arch):
-        super(Model, self).__init__()
 
-        module = import_module('model.{}'.format(model_type), package=None)
-
-        self.encoder = getattr(module, 'Encoder')(**arch['encoder'])
-        self.quantizer = VectorQuantizer( arch['z_num'], arch['z_dim'], normalize=arch['embed_norm'], reduction='sum')
-        
-        self.beta = arch['beta']
-        self.y_num = arch['y_num']
-
-    def forward(self, input):
-        x = input  
-        # Encode
-        z = self.encoder(x)
-
-        return z
-
-    def get_codebook(self):
-        return self.quantizer._embedding.data
-
-
-    def load_state_dict(self, state_dict):
-        warning_mseg =  'Embedding size mismatch for {}: '
-        warning_mseg += 'copying a param with shape {} from checkpoint, '
-        warning_mseg += 'resizing the param with shape {} in current model.'
-
-        state_dict_shape, module_param_shape = state_dict['quantizer._embedding'].shape, self.quantizer._embedding.shape
-        if state_dict_shape != module_param_shape:
-            print(warning_mseg.format('model.quantizer', state_dict_shape, module_param_shape))
-            self.quantizer = VectorQuantizer( 
-                    state_dict_shape[0], state_dict_shape[1], 
-                    normalize=self.quantizer.normalize, reduction=self.quantizer.reduction
-                    )
-        state_dict_new = dict()
-        for key, param in state_dict.items():
-            if key.split('.')[0] in ['encoder','quantizer']:
-                state_dict_new[key] = param
-
-        super(Model, self).load_state_dict(state_dict_new)
-
-
-def inference( utt2path, model_type, model_path, output_feat_dir, output_txt):
+def inference( utt2path, model_type, model_path, model_config, data_config, output_feat_dir, output_txt):
 
     stat_dict       = data_config.get('statistic_file', None)
     feat_kind       = data_config.get('feature_kind', 'mel-id')
@@ -72,21 +29,19 @@ def inference( utt2path, model_type, model_path, output_feat_dir, output_txt):
 
     feature_kinds = feat_kind.split('-')
 
-    model = Model( model_type, model_config)
-
+    module = import_module('model.{}'.format(model_type), package=None)
+    model = getattr(module, 'Model')( model_config)
     model.load_state_dict(torch.load(model_path, map_location='cpu')['model'])
     model.cuda().eval()
-
-    codebook = model.get_codebook()
-    codebook = codebook / codebook.norm(dim=1, keepdim=True)
-
     
     if output_txt and feature_kinds[-1] in ['id','csid']:
         wspecifier = '{0}/raw_bnfeat_{1}2{2}.txt'
         feat_writer = open(wspecifier.format(str(output_feat_dir),feature_kinds[0],feature_kinds[-1]),'w')
     else:
         wspecifier = 'ark,scp:{0}/raw_bnfeat_{1}.ark,{0}/raw_bnfeat_{1}.scp'
-        feat_writer = MatrixWriter(wspecifier.format(str(output_feat_dir),feature_kinds[0]))
+        feat_writer = WriteHelper(
+            wspecifier.format(str(output_feat_dir),feature_kinds[0]), 
+            compression_method=1)
         output_txt = False
 
     for i, (utt,path) in enumerate(utt2path):
@@ -96,28 +51,17 @@ def inference( utt2path, model_type, model_path, output_feat_dir, output_txt):
         X_mel = X['mel']
    
         with torch.no_grad():
-            z = model(X_in)
-            z = z.squeeze(0).t()
-            distances = (torch.sum(z.pow(2), dim=1, keepdim=True) 
-                        + torch.sum(codebook.pow(2), dim=1)
-                        - 2 * torch.matmul(z, codebook.t()))
-            z_id = torch.argmin(distances, dim=1)
-            z_vq = codebook.index_select(dim=0, index=z_id)
-            z_vq = z_vq.t()
-            
-            counter = torch.zeros(z_id.size(0), codebook.size(0), device=z_id.device)
-            counter.scatter_(1, z_id.unsqueeze(1), 1)
-            count = counter.sum(dim=0)
+            z = model.encoder(X_in)
+            z_id = model.quantizer.encode(z)
+            z_vq = model.quantizer.decode(z_id)
             
         # Save converted feats
         if feature_kinds[-1] == 'id':
-            X_bnf = z_id.unsqueeze(-1).cpu().numpy()
+            X_bnf = z_id.view(-1).cpu().numpy()
         if feature_kinds[-1] == 'csid':
-            X_bnf = z_id.unique_consecutive().unsqueeze(-1).cpu().numpy()
+            X_bnf = z_id.view(-1).unique_consecutive().cpu().numpy()
         elif feature_kinds[-1] == 'token':
-            X_bnf = z_vq.t().cpu().numpy()
-        elif feature_kinds[-1] == 'count':
-            X_bnf = count.unsqueeze(0).cpu().numpy()
+            X_bnf = z_vq.squeeze(0).t().cpu().numpy()
 
         if output_txt:
             X_bnf = X_bnf.reshape(-1)
@@ -161,9 +105,7 @@ if __name__ == "__main__":
         data = f.read()
     config = json.loads(data)
     infer_config = config["infer_config"] 
-    global data_config
     data_config = config["data_config"]
-    global model_config
 
     if args.model_path is None:
         model_path = infer_config["model_path"]
@@ -200,4 +142,9 @@ if __name__ == "__main__":
    
     output_txt = True if args.output_txt.lower() in ['true'] else False
 
-    inference( utt2path, model_type, model_path, output_feat_dir, output_txt)
+    inference( 
+        utt2path, 
+        model_type, model_path, model_config, 
+        data_config, 
+        output_feat_dir, output_txt
+    )

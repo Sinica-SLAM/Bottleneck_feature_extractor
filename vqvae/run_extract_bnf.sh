@@ -37,6 +37,16 @@ bnf_data_dir=$2
 # you might not want to do this for interactive shells.
 set -e
 
+feature_config="$(find "${model_dir}" -name "config_feature*.json" -print0 | xargs -0 ls -t | head -n 1)"
+model_config="$(find "${model_dir}" -name "config_vqvae*.json" -print0 | xargs -0 ls -t | head -n 1)"
+model_file="$(find "${model_dir}" -name "model*.pt" -print0 | xargs -0 ls -t | head -n 1)"
+stats_file="$(find "${model_dir}" -name "stats*.pt" -print0 | xargs -0 ls -t | head -n 1)"
+
+echo "get feature config: $feature_config"
+echo "get model config: $model_config"
+echo "get model file: $model_file"
+echo "get stats file: $stats_file"
+
 if [ $stage -le 0 -a $stop_stage -ge 0 ]; then
     utils/copy_data_dir.sh $data_dir $bnf_data_dir/melspec
     utils/data/resample_data_dir.sh 16000 $bnf_data_dir/melspec
@@ -45,25 +55,25 @@ fi
 # Feature preprocessing
 if [ $stage -le 1 -a $stop_stage -ge 1 ]; then
     # Extract features
-    python vqvae/feature_extraction.py -c $model_dir/config_feature.json \
+    python vqvae/feature_extraction.py -c $feature_config \
         -T $bnf_data_dir/melspec -F $bnf_data_dir/melspec/data \
         -K "mel"
     # Feature normalization
     utils/copy_data_dir.sh $bnf_data_dir/melspec $bnf_data_dir/melspec_cmvn
-    python vqvae/feature_normalization.py -c $model_dir/config_feature.json \
+    python vqvae/feature_normalization.py -c $feature_config \
         -T $bnf_data_dir/melspec_cmvn -F $bnf_data_dir/melspec_cmvn/data \
-        -S ${model_dir}/stats.pt \
+        -S $stats_file \
         -K "mel"            
 fi
 
 # Extracing token feature
 if [ $stage -le 2 -a $stop_stage -ge 2 ]; then
     python vqvae/inference_bnf.py \
-        -c $model_dir/config_vqvae.json \
+        -c $model_config \
         -d $bnf_data_dir/melspec_cmvn \
         -o $bnf_data_dir \
         -K "mel-${bnf_name}" \
-        -m ${model_dir}/model.pt -g $gpu \
+        -m $model_file -g $gpu \
         --output_txt $output_txt
 fi
 

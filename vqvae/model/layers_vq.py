@@ -33,6 +33,49 @@ class VectorQuantizer(torch.nn.Module):
                     self.target_norm / self._embedding.norm(dim=1, keepdim=True)
                 )
 
+    def encode(self, z, time_last=True):
+        # Flatten
+        if time_last:
+            B,D,T = z.shape
+            z = z.transpose(1,2).contiguous().view(-1, D)
+        else:
+            B,T,D = z.shape
+            z = z.contiguous().view(-1, D)
+        # Normalize
+        if self.target_norm:
+            z_norm = self.target_norm * z / z.norm(dim=1, keepdim=True)
+            embeddings = self.target_norm * self.embeddings / self.embeddings.norm(dim=1, keepdim=True)
+        else:
+            z_norm = z
+            embeddings = self.embeddings
+        # Calculate distances
+        distances = (torch.sum(z_norm.pow(2), dim=1, keepdim=True) 
+                    + torch.sum(embeddings.pow(2), dim=1)
+                    - 2 * torch.matmul(z_norm, embeddings.t()))            
+        # # Quantization encode
+        encoding_idx = torch.argmin(distances, dim=1)
+        # Deflatten
+        encoding_idx = encoding_idx.view(B, T)
+        return encoding_idx
+
+
+    def decode(self, z_id, time_last=True):
+        # Flatten
+        B,T = z_id.shape
+        encoding_idx = z_id.flatten()
+        # Normalize
+        if self.target_norm:
+            embeddings = self.target_norm * self.embeddings / self.embeddings.norm(dim=1, keepdim=True)
+        else:
+            embeddings = self.embeddings
+        # Quantization decode
+        z_vq = embeddings.index_select(dim=0, index=encoding_idx)
+        # Deflatten
+        z_vq = z_vq.view(B, T, -1)
+        if time_last:
+            z_vq = z_vq.transpose(1,2).contiguous()
+        return z_vq
+
     def forward(self, z, mask=None, time_last=True, time_reduction=False):
         if not self.quantize:
             tensor_0 = torch.tensor(0.0, dtype=torch.float, device=z.device)
@@ -212,6 +255,37 @@ class EMAVectorQuantizer(torch.nn.Module):
                     used_curr=used_curr,
                     usage=usage,
                     dk=dk)
+
+    def encode(self, z, time_last=True):
+        # Flatten
+        if time_last:
+            B,D,T = z.shape
+            z = z.transpose(1,2).contiguous().view(-1, D)
+        else:
+            B,T,D = z.shape
+            z = z.contiguous().view(-1, D)
+        # Calculate distances
+        distances = (torch.sum(z.pow(2), dim=1, keepdim=True) 
+                    + torch.sum(self.embeddings.pow(2), dim=1)
+                    - 2 * torch.matmul(z, self.embeddings.t()))           
+        # # Quantization encode
+        encoding_idx = torch.argmin(distances, dim=1)
+        # Deflatten
+        encoding_idx = encoding_idx.view(B, T)
+        return encoding_idx
+
+
+    def decode(self, z_id, time_last=True):
+        # Flatten
+        B,T = z_id.shape
+        encoding_idx = z_id.flatten()
+        # Quantization decode
+        z_vq = self.embeddings.index_select(dim=0, index=encoding_idx)
+        # Deflatten
+        z_vq = z_vq.view(B, T, -1)
+        if time_last:
+            z_vq = z_vq.transpose(1,2).contiguous()
+        return z_vq
 
     def forward(self, z, time_last=True, time_reduction=False):
         if not self.quantize:

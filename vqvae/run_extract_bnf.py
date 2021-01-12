@@ -13,58 +13,19 @@ import math
 import torch
 import torch.nn.functional as F
 
-# from kaldi.util.table import VectorWriter, MatrixWriter
-from kaldiio import ReadHelper
+from kaldiio import ReadHelper, WriteHelper
 
 from feature.mel_spectrum import MelSpectrum
-from model.layers_vq import VectorQuantizer
 
 MAX_WAV_VALUE = 32768.0
 
-class Model(torch.nn.Module):
-    def __init__(self, model_type, arch):
-        super(Model, self).__init__()
 
-        module = import_module('model.{}'.format(model_type), package=None)
-
-        self.encoder = getattr(module, 'Encoder')(**arch['encoder'])
-        self.quantizer = VectorQuantizer( arch['z_num'], arch['z_dim'], normalize=arch['embed_norm'], reduction='sum')
-        
-        self.beta = arch['beta']
-        self.y_num = arch['y_num']
-
-    def forward(self, input):
-        x = input  
-        # Encode
-        z = self.encoder(x)
-
-        return z
-
-    def get_codebook(self):
-        return self.quantizer._embedding.data
-
-
-    def load_state_dict(self, state_dict):
-        warning_mseg =  'Embedding size mismatch for {}: '
-        warning_mseg += 'copying a param with shape {} from checkpoint, '
-        warning_mseg += 'resizing the param with shape {} in current model.'
-
-        state_dict_shape, module_param_shape = state_dict['quantizer._embedding'].shape, self.quantizer._embedding.shape
-        if state_dict_shape != module_param_shape:
-            print(warning_mseg.format('model.quantizer', state_dict_shape, module_param_shape))
-            self.quantizer = VectorQuantizer( 
-                    state_dict_shape[0], state_dict_shape[1], 
-                    normalize=self.quantizer.normalize, reduction=self.quantizer.reduction
-                    )
-        state_dict_new = dict()
-        for key, param in state_dict.items():
-            if key.split('.')[0] in ['encoder','quantizer']:
-                state_dict_new[key] = param
-
-        super(Model, self).load_state_dict(state_dict_new)
-
-
-def inference( wav_scp, bnf_feature_kind, model_type, model_path, output_wf):
+def inference( 
+        rspecifier, wspecifier, 
+        model_type, model_path, model_config, 
+        bnf_feature_kind, data_config, 
+        output_txt
+    ):
 
     stat_dict       = data_config.get('statistic_file', None)
     feat_kind       = data_config.get('feature_kind', 'mel-id')
@@ -77,15 +38,15 @@ def inference( wav_scp, bnf_feature_kind, model_type, model_path, output_wf):
     mel_fmax        = data_config.get('mel_fmax', 7600)   
 
     feature_kinds = feat_kind.split('-')
+    assert feature_kinds[0] in ['mel']
+    assert bnf_feature_kind in ['id','csid','token']
 
-    model = Model( model_type, model_config)
-
+    module = import_module('model.{}'.format(model_type), package=None)
+    model = getattr(module, 'Model')( model_config)
     model.load_state_dict(torch.load(model_path, map_location='cpu')['model'])
     model.cuda().eval()
 
-    codebook = model.get_codebook()
-    codebook = codebook / codebook.norm(dim=1, keepdim=True)
-
+    # Read stat scp
     if stat_dict is None:
         with open(data_config.get('training_dir','') / 'stat.scp', 'r') as rf:
             stat_dict = [line.rstrip() for line in rf.readlines()][0]
@@ -105,52 +66,51 @@ def inference( wav_scp, bnf_feature_kind, model_type, model_path, output_wf):
         feat_stat=feat_stat
     ).cuda()
 
+    if output_txt and bnf_feature_kind in ['id','csid']:
+        bnf_writer = open(wspecifier,'w')
+    else:
+        bnf_writer = WriteHelper(bnf_writer, compression_method=1)
+        output_txt = False
 
-    with ReadHelper('scp:{}'.format(wav_scp)) as reader:
-        for utt, (rate, X) in reader:
-            X = X.astype(np.float32) / MAX_WAV_VALUE
-            X = librosa.core.resample(
-                    X, 
-                    rate, 
-                    sampling_rate, 
-                    res_type='kaiser_best'
-                )
-            if np.max(np.abs(X)) >= 1.0:
-                X /= np.max(np.abs(X))
-            # Extract features
-            X = feat_fn(torch.from_numpy(X).cuda().unsqueeze(0))
-            X = feat_fn.normalize(X)
+    for utt, (rate, X) in ReadHelper(rspecifier):
+        X = X.astype(np.float32) / MAX_WAV_VALUE
+        X = librosa.core.resample(
+                X, 
+                rate, 
+                sampling_rate, 
+                res_type='kaiser_best'
+            )
+        if np.max(np.abs(X)) >= 1.0:
+            X /= np.max(np.abs(X))
+        # Extract features
+        X = feat_fn(torch.from_numpy(X).cuda().unsqueeze(0))
+        X = feat_fn.normalize(X)
 
-            X_in = X[feature_kinds[0]]
-       
-            with torch.no_grad():
-                z = model(X_in)
-                z = z.squeeze(0).t()
-                distances = (torch.sum(z.pow(2), dim=1, keepdim=True) 
-                            + torch.sum(codebook.pow(2), dim=1)
-                            - 2 * torch.matmul(z, codebook.t()))
-                z_id = torch.argmin(distances, dim=1)
-                z_vq = codebook.index_select(dim=0, index=z_id)
-                z_vq = z_vq.t()
-                
-                counter = torch.zeros(z_id.size(0), codebook.size(0), device=z_id.device)
-                counter.scatter_(1, z_id.unsqueeze(1), 1)
-                count = counter.sum(dim=0)
-                
-            # Save converted feats
-            if bnf_feature_kind == 'id':
-                X_bnf = z_id.unsqueeze(-1).cpu().numpy()
-            if bnf_feature_kind == 'csid':
-                X_bnf = z_id.unique_consecutive().unsqueeze(-1).cpu().numpy()
-
-            X_bnf = X_bnf.reshape(-1)
-            X_bnf = ''.join(['<{}>'.format(X_) for X_ in X_bnf])
-            output_wf.write('{} {}\n'.format(utt,X_bnf))
+        X_in = X['mel']
+   
+        with torch.no_grad():
+            z = model.encoder(X_in)
+            z_id = model.quantizer.encode(z)
+            z_vq = model.quantizer.decode(z_id)
             
-            print('Extracting BNF {} of {}.'.format( bnf_feature_kind, utt),end=' '*30+'\r')
+        # Save converted feats
+        if bnf_feature_kind == 'id':
+            X_bnf = z_id.view(-1).cpu().numpy()
+        if bnf_feature_kind == 'csid':
+            X_bnf = z_id.view(-1).unique_consecutive().cpu().numpy()
+        elif bnf_feature_kind == 'token':
+            X_bnf = z_vq.squeeze(0).t().cpu().numpy()
 
-    if output_wf is not sys.stdout:
-        output_wf.close()
+        if output_txt:
+            X_bnf = X_bnf.reshape(-1)
+            X_bnf = ''.join(['<{}>'.format(bnf) for bnf in X_bnf])
+            bnf_writer.write('{} {}\n'.format(utt,X_bnf))
+        else:
+            bnf_writer.write(utt, X_bnf)
+        
+        print('Extracting BNF {} of {}.'.format( bnf_feature_kind, utt),end=' '*30+'\r')
+
+    bnf_writer.close()
 
 
 if __name__ == "__main__":
@@ -165,12 +125,14 @@ if __name__ == "__main__":
                         help='Path to checkpoint with model')
     parser.add_argument('-s','--statistic_file', type=str, default=None,
                         help='Statistic file path')
-    parser.add_argument('-b','--bnf_feature_kind', type=str, default=None,
+    parser.add_argument('-b','--bnf_feature_kind', type=str, default='id',
                         help='Feature kinds')
-    parser.add_argument('-g', "--gpu", type=str, default='0,1')
-    parser.add_argument('-w','--wav_scp', type=str, default=None,
-                        help='Dir. for input data')    
-    parser.add_argument('-o', "--output_text_file", type=str, default=None)  
+    parser.add_argument('-t','--output_txt', type=str, default='true')
+    parser.add_argument('-g', "--gpu", type=str, default='0')
+    parser.add_argument('rspecifier', type=str,
+                        help='Input specifier')
+    parser.add_argument('wspecifier', type=str,
+                        help='Output specifier')
     args = parser.parse_args()
     
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -180,9 +142,7 @@ if __name__ == "__main__":
         data = f.read()
     config = json.loads(data)
     infer_config = config["infer_config"] 
-    global data_config
     data_config = config["data_config"]
-    global model_config
 
     if args.model_path is None:
         model_path = infer_config["model_path"]
@@ -200,16 +160,11 @@ if __name__ == "__main__":
     if args.statistic_file is not None:
         data_config['statistic_file'] = args.statistic_file
 
-    # Load wav.scp
-    if args.wav_scp is None:
-        wav_scp = Path(data_config["testing_dir"]) / 'wav.scp'
-    else:
-        wav_scp = Path(args.wav_scp)
+    output_txt = True if args.output_txt.lower() in ['true'] else False
 
-    # Make dir. for outputing converted feature
-    if args.output_text_file is None:
-        output_wf = sys.stdout
-    else:
-        output_wf = open(args.output_text_file,'w')
-
-    inference( wav_scp, args.bnf_feature_kind, model_type, model_path, output_wf)
+    inference( 
+        args.rspecifier, args.wspecifier,
+        model_type, model_path, model_config, 
+        args.bnf_feature_kind, data_config, 
+        output_txt
+    )
